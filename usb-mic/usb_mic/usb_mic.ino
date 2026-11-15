@@ -74,7 +74,14 @@ void setup() {
 
 void loop() {
   // Пока на ПК никто не открыл порт, просто выбрасываем сэмплы.
-  if (!Serial) {
+  // Не используем `if (!Serial)`: на Leonardo эта проверка каждый раз
+  // ждёт 10 мс, и из 16000 сэмплов в секунду доходило только ~3000.
+#ifdef USBCON
+  bool connected = Serial.dtr();
+#else
+  bool connected = true;
+#endif
+  if (!connected) {
     tail = head;
     digitalWrite(LED_BUILTIN, LOW);
     return;

@@ -123,9 +123,17 @@ def meter(raw: np.ndarray, y: np.ndarray, dc: float, in_rate: float) -> str:
     rms = float(np.sqrt(np.mean(y * y))) if len(y) else 0.0
     db = 20 * np.log10(max(rms, 1e-5))
     bar = "#" * int(max(0.0, min(40.0, (db + 60) * 40 / 60)))
-    clip = " CLIP!" if len(y) and np.max(np.abs(y)) >= 0.999 else ""
-    return (f"\rDC {dc:6.1f}/1023  размах {int(raw.max() - raw.min()) if len(raw) else 0:4d}"
-            f"  {in_rate / 1000:4.1f} кГц  {db:6.1f} dB |{bar:<40}|{clip}   ")
+    clip = "CLIP!" if len(y) and np.max(np.abs(y)) >= 0.999 else ""
+    if dc < 50 or dc > 973:
+        warn = "проверь проводку!"
+    elif in_rate < 14000:
+        warn = "теряются сэмплы"
+    else:
+        warn = ""
+    line = (f"DC {dc:6.1f}/1023  размах {int(raw.max() - raw.min()) if len(raw) else 0:4d}"
+            f"  {in_rate / 1000:4.1f} кГц  {db:6.1f} dB |{bar:<40}| {clip:5} {warn}")
+    # Дополняем пробелами, чтобы не оставались хвосты от прошлой строки.
+    return "\r" + line.ljust(120)
 
 
 def main():
