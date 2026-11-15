@@ -42,6 +42,37 @@ class Decoder:
         return vals
 
 
+class Declicker:
+    """Убирает короткие выбросы (щелчки) в сырых данных.
+
+    Усилитель АЦП пропускает только до ~4 кГц, поэтому настоящий звук не
+    может скакнуть за 1-2 сэмпла (при 16 кГц). Если сэмпл сильно отличается
+    от медианы своих соседей — это помеха, заменяем его медианой.
+    Задержка — 2 сэмпла.
+    """
+
+    def __init__(self, threshold: float):
+        self.threshold = threshold
+        self.prev = None
+        self.clicks = 0
+
+    def process(self, raw: np.ndarray) -> np.ndarray:
+        x = raw.astype(np.float32)
+        if self.prev is None:
+            self.prev = np.full(4, x[0], np.float32)
+        x = np.concatenate([self.prev, x])
+        self.prev = x[-4:]
+        center = x[2:-2]
+        med = np.median(np.lib.stride_tricks.sliding_window_view(x, 5), axis=1)
+        dev = np.abs(center - med)
+        # Громкий высокий звук тоже отличается от медианы, но равномерно по
+        # всему окну, а щелчок — одиночный. Сравниваем с соседями (~2 мс).
+        local = np.convolve(dev, np.ones(33, np.float32) / 33)[16:16 + len(dev)]
+        bad = (dev > self.threshold) & (dev > 4 * local)
+        self.clicks += int(bad.sum())
+        return np.where(bad, med, center)
+
+
 class Denoiser:
     """Спектральное шумоподавление.
 
@@ -105,7 +136,9 @@ class Denoiser:
 class Processor:
     """Убирает постоянную составляющую, усиливает, режет шум."""
 
-    def __init__(self, gain: float, gate: float, denoiser: "Denoiser | None" = None):
+    def __init__(self, gain: float, gate: float, denoiser: "Denoiser | None" = None,
+                 declicker: "Declicker | None" = None):
+        self.declicker = declicker
         self.gain = gain
         self.gate = gate
         self.denoiser = denoiser
@@ -113,7 +146,7 @@ class Processor:
         self.gate_open = 0.0
 
     def process(self, raw: np.ndarray) -> np.ndarray:
-        x = raw.astype(np.float32)
+        x = self.declicker.process(raw) if self.declicker else raw.astype(np.float32)
         m = float(x.mean())
         self.dc = m if self.dc is None else self.dc + 0.05 * (m - self.dc)
         y = (x - self.dc) / 512.0 * self.gain
@@ -183,7 +216,7 @@ def find_port() -> str:
     sys.exit(f"Не нашёл Arduino автоматически ({names}). Укажи --port.")
 
 
-def meter(raw: np.ndarray, y: np.ndarray, dc: float, in_rate: float) -> str:
+def meter(raw: np.ndarray, y: np.ndarray, dc: float, in_rate: float, clicks: int = 0) -> str:
     rms = float(np.sqrt(np.mean(y * y))) if len(y) else 0.0
     db = 20 * np.log10(max(rms, 1e-5))
     bar = "#" * int(max(0.0, min(40.0, (db + 60) * 40 / 60)))
@@ -195,7 +228,8 @@ def meter(raw: np.ndarray, y: np.ndarray, dc: float, in_rate: float) -> str:
     else:
         warn = ""
     line = (f"DC {dc:6.1f}/1023  размах {int(raw.max() - raw.min()) if len(raw) else 0:4d}"
-            f"  {in_rate / 1000:4.1f} кГц  {db:6.1f} dB |{bar:<40}| {clip:5} {warn}")
+            f"  {in_rate / 1000:4.1f} кГц  {db:6.1f} dB |{bar:<40}| {clip:5}"
+            f" щелчков {clicks:<4d} {warn}")
     # Дополняем пробелами до ширины окна (но не больше), чтобы не оставались
     # хвосты от прошлой строки и строка не переносилась.
     width = shutil.get_terminal_size((100, 20)).columns - 1
@@ -212,6 +246,8 @@ def main():
     ap.add_argument("--gain", type=float, default=20.0, help="усиление (по умолч. 20)")
     ap.add_argument("--denoise", type=float, default=1.5, metavar="СИЛА",
                     help="сила шумоподавления: 1 — мягко, 2–3 — сильно, 0 — выкл (по умолч. 1.5)")
+    ap.add_argument("--declick", type=float, default=40, metavar="ПОРОГ",
+                    help="убирать щелчки резче ПОРОГ единиц АЦП (по умолч. 40, 0 — выкл)")
     ap.add_argument("--gate", type=float, default=0.0,
                     help="шумоподавитель: порог RMS 0..1, например 0.02 (0 = выкл)")
     ap.add_argument("--latency", type=float, default=0.15,
@@ -234,7 +270,8 @@ def main():
 
     dec = Decoder()
     denoiser = Denoiser(args.rate, args.denoise) if args.denoise > 0 else None
-    proc = Processor(args.gain, args.gate, denoiser)
+    declicker = Declicker(args.declick) if args.declick > 0 else None
+    proc = Processor(args.gain, args.gate, denoiser, declicker)
     if denoiser:
         print("Калибровка шумоподавления: помолчи первые 1.5 секунды...")
     player = None if args.no_play else Player(args.rate, args.device, args.latency)
@@ -268,7 +305,8 @@ def main():
             now = time.monotonic()
             if now - last_print >= 0.1:
                 r, yy = np.concatenate(raw_acc), np.concatenate(y_acc)
-                sys.stdout.write(meter(r, yy, proc.dc, count / (now - last_print)))
+                sys.stdout.write(meter(r, yy, proc.dc, count / (now - last_print),
+                                       declicker.clicks if declicker else 0))
                 sys.stdout.flush()
                 last_print, count = now, 0
                 raw_acc, y_acc = [], []
