@@ -42,12 +42,73 @@ class Decoder:
         return vals
 
 
+class Denoiser:
+    """Спектральное шумоподавление.
+
+    Первые `calib` секунд слушает тишину и запоминает спектр шума, дальше
+    в каждом кадре приглушает частоты, где сигнал не громче шума. Заодно
+    отрезает всё ниже 80 Гц (гул) и выше 4 кГц (там голоса почти нет, а
+    усилитель АЦП всё равно пропускает только до ~4 кГц).
+    Кадры по 512 сэмплов с перекрытием 50% => добавляет ~32 мс задержки.
+    """
+
+    N = 512
+    H = 256
+
+    def __init__(self, rate: int, strength: float, calib: float = 1.5):
+        self.strength = strength
+        self.win = np.sqrt(np.hanning(self.N + 1)[:-1]).astype(np.float32)
+        freqs = np.fft.rfftfreq(self.N, 1.0 / rate)
+        self.band = ((freqs >= 80) & (freqs <= 4000)).astype(np.float32)
+        self.inbuf = np.zeros(0, np.float32)
+        self.ola = np.zeros(self.N, np.float32)
+        self.noise = np.zeros(len(freqs), np.float32)
+        self.calib_left = max(1, int(calib * rate / self.H))
+        self.calib_total = self.calib_left
+        self.prev_gain = np.ones(len(freqs), np.float32)
+
+    @property
+    def calibrating(self) -> bool:
+        return self.calib_left > 0
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        self.inbuf = np.concatenate([self.inbuf, x])
+        out = []
+        while len(self.inbuf) >= self.N:
+            frame = self.inbuf[:self.N] * self.win
+            self.inbuf = self.inbuf[self.H:]
+            spec = np.fft.rfft(frame)
+            power = (spec.real ** 2 + spec.imag ** 2).astype(np.float32)
+
+            if self.calib_left > 0:
+                self.noise += power / self.calib_total
+                self.calib_left -= 1
+                gain = np.zeros_like(power)
+            else:
+                # Тихие кадры понемногу уточняют оценку шума.
+                if power.sum() < 2.0 * self.noise.sum():
+                    self.noise = 0.95 * self.noise + 0.05 * power
+                g = 1.0 - self.strength * self.noise / np.maximum(power, 1e-12)
+                g = np.maximum(g, 0.05)
+                # Сглаживание во времени уменьшает «булькающие» артефакты.
+                gain = 0.5 * g + 0.5 * self.prev_gain
+                self.prev_gain = gain
+                gain = gain * self.band
+
+            y = np.fft.irfft(spec * gain, self.N).astype(np.float32) * self.win
+            self.ola += y
+            out.append(self.ola[:self.H].copy())
+            self.ola = np.concatenate([self.ola[self.H:], np.zeros(self.H, np.float32)])
+        return np.concatenate(out) if out else np.zeros(0, np.float32)
+
+
 class Processor:
     """Убирает постоянную составляющую, усиливает, режет шум."""
 
-    def __init__(self, gain: float, gate: float):
+    def __init__(self, gain: float, gate: float, denoiser: "Denoiser | None" = None):
         self.gain = gain
         self.gate = gate
+        self.denoiser = denoiser
         self.dc = None
         self.gate_open = 0.0
 
@@ -56,7 +117,9 @@ class Processor:
         m = float(x.mean())
         self.dc = m if self.dc is None else self.dc + 0.05 * (m - self.dc)
         y = (x - self.dc) / 512.0 * self.gain
-        if self.gate > 0:
+        if self.denoiser:
+            y = self.denoiser.process(y)
+        if self.gate > 0 and len(y):
             rms = float(np.sqrt(np.mean(y * y)))
             target = 1.0 if rms > self.gate else 0.0
             self.gate_open += 0.3 * (target - self.gate_open)
@@ -147,6 +210,8 @@ def main():
                     help="частота дискретизации, как SAMPLE_RATE в скетче")
     ap.add_argument("--device", help="устройство вывода: номер или часть имени")
     ap.add_argument("--gain", type=float, default=20.0, help="усиление (по умолч. 20)")
+    ap.add_argument("--denoise", type=float, default=1.5, metavar="СИЛА",
+                    help="сила шумоподавления: 1 — мягко, 2–3 — сильно, 0 — выкл (по умолч. 1.5)")
     ap.add_argument("--gate", type=float, default=0.0,
                     help="шумоподавитель: порог RMS 0..1, например 0.02 (0 = выкл)")
     ap.add_argument("--latency", type=float, default=0.15,
@@ -168,7 +233,10 @@ def main():
     print(f"Порт {port}. Ctrl+C — выход.")
 
     dec = Decoder()
-    proc = Processor(args.gain, args.gate)
+    denoiser = Denoiser(args.rate, args.denoise) if args.denoise > 0 else None
+    proc = Processor(args.gain, args.gate, denoiser)
+    if denoiser:
+        print("Калибровка шумоподавления: помолчи первые 1.5 секунды...")
     player = None if args.no_play else Player(args.rate, args.device, args.latency)
     wav = None
     if args.record:
@@ -187,6 +255,9 @@ def main():
             if not len(raw):
                 continue
             y = proc.process(raw)
+            if denoiser and not denoiser.calibrating and not getattr(main, "_said", False):
+                main._said = True
+                sys.stdout.write("\rГотово, можно говорить." + " " * 60 + "\n")
             if player:
                 player.push(y)
             if wav:
