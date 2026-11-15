@@ -160,6 +160,31 @@ class Processor:
         return np.clip(y, -1.0, 1.0)
 
 
+def resolve_device(sd, device):
+    """Номер устройства вывода по номеру или части имени.
+
+    На Windows одно устройство видно через несколько API (MME, DirectSound,
+    WASAPI), и sounddevice отказывается выбирать сам. Берём MME или
+    DirectSound: они сами пересчитывают частоту 16 кГц под устройство.
+    """
+    if device is None:
+        return None
+    if str(device).isdigit():
+        return int(device)
+    apis = [a["name"] for a in sd.query_hostapis()]
+    found = [(i, d) for i, d in enumerate(sd.query_devices())
+             if d["max_output_channels"] > 0 and str(device).lower() in d["name"].lower()]
+    if not found:
+        sys.exit(f"Устройство вывода «{device}» не найдено. Посмотри список: --list-devices")
+    order = ["MME", "Windows DirectSound", "Windows WASAPI"]
+
+    def rank(item):
+        api = apis[item[1]["hostapi"]]
+        return order.index(api) if api in order else len(order)
+
+    return min(found, key=rank)[0]
+
+
 class Player:
     """Буфер между Arduino и звуковой картой. Их часы немного расходятся,
     поэтому при переполнении выкидываем старое, при нехватке — тишина."""
@@ -173,7 +198,7 @@ class Player:
         self.lock = threading.Lock()
         self.stream = sd.OutputStream(
             samplerate=rate, channels=1, dtype="float32",
-            device=device, callback=self._callback, blocksize=256,
+            device=resolve_device(sd, device), callback=self._callback, blocksize=256,
         )
         self.stream.start()
 

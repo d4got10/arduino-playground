@@ -59,12 +59,24 @@ Zoom, OBS и любых других программ.
 ## Превращаем в микрофон для программ
 
 ### Windows
-1. Поставь бесплатный [VB-Audio Virtual Cable](https://vb-audio.com/Cable/).
-2. Запусти:
+1. Поставь бесплатный [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)
+   (запусти `VBCABLE_Setup_x64.exe` от имени администратора) и перезагрузись.
+2. Запусти двойным кликом `start_discord_mic.bat`. Это то же самое, что:
    ```bash
-   python host/usb_mic.py --device "CABLE Input"
+   python host/usb_mic.py --device "CABLE Input" --gain 3
    ```
-3. В Discord/Zoom/OBS выбери микрофон **CABLE Output**.
+   Первые 1.5 секунды молчи: идёт калибровка шумоподавления.
+3. В Discord/Zoom/OBS выбери микрофон **CABLE Output (VB-Audio Virtual Cable)**.
+
+Настройки Discord (Настройки → Голос и видео):
+- **Устройство ввода:** CABLE Output (VB-Audio Virtual Cable).
+- **Громкость микрофона:** около 100%.
+- **Чувствительность ввода:** выключи «Автоматически» и поставь порог чуть
+  выше уровня фона, пока молчишь.
+- **Шумоподавление (Krisp):** попробуй включённым: оно хорошо убирает остатки
+  шума. Если голос режется, выключи.
+- **Эхоподавление:** можно выключить.
+- Проверка: кнопка «Проверить» (Let's Check) в том же разделе.
 
 ### Linux (PulseAudio/PipeWire)
 ```bash
