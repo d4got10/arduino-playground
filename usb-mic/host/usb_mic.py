@@ -10,6 +10,7 @@
 
 import argparse
 import collections
+import shutil
 import sys
 import threading
 import time
@@ -132,8 +133,10 @@ def meter(raw: np.ndarray, y: np.ndarray, dc: float, in_rate: float) -> str:
         warn = ""
     line = (f"DC {dc:6.1f}/1023  размах {int(raw.max() - raw.min()) if len(raw) else 0:4d}"
             f"  {in_rate / 1000:4.1f} кГц  {db:6.1f} dB |{bar:<40}| {clip:5} {warn}")
-    # Дополняем пробелами, чтобы не оставались хвосты от прошлой строки.
-    return "\r" + line.ljust(120)
+    # Дополняем пробелами до ширины окна (но не больше), чтобы не оставались
+    # хвосты от прошлой строки и строка не переносилась.
+    width = shutil.get_terminal_size((100, 20)).columns - 1
+    return "\r" + line[:width].ljust(width)
 
 
 def main():
