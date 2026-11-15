@@ -125,7 +125,7 @@ def meter(raw: np.ndarray, y: np.ndarray, dc: float, in_rate: float) -> str:
     bar = "#" * int(max(0.0, min(40.0, (db + 60) * 40 / 60)))
     clip = "CLIP!" if len(y) and np.max(np.abs(y)) >= 0.999 else ""
     if dc < 50 or dc > 973:
-        warn = "проверь проводку!"
+        warn = "у края шкалы: проводка / крути потенциометр"
     elif in_rate < 14000:
         warn = "теряются сэмплы"
     else:
